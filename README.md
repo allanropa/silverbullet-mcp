@@ -1,6 +1,6 @@
 # SilverBullet MCP
 
-Servidor MCP para consultar páginas y tareas de SilverBullet y crear páginas nuevas. Utiliza la Runtime API y la HTTP API de SilverBullet; no mantiene un índice propio.
+Servidor MCP para consultar páginas y tareas de SilverBullet, crear páginas nuevas y actualizar páginas existentes. Utiliza la Runtime API y la HTTP API de SilverBullet; no mantiene un índice propio.
 
 ## Funciones
 
@@ -8,8 +8,9 @@ Servidor MCP para consultar páginas y tareas de SilverBullet y crear páginas n
 - Buscar texto, leer páginas y consultar relaciones directas por etiqueta.
 - Listar tareas pendientes y preparar un resumen básico.
 - Crear páginas nuevas con contenido y metadatos opcionales, sin sobrescribir páginas existentes.
+- Actualizar páginas existentes con control de revisión.
 
-Los resultados incluyen el nombre de la página o la referencia de origen cuando está disponible. El servidor no ofrece operaciones para modificar o eliminar páginas existentes ni para completar tareas.
+Los resultados incluyen el nombre de la página o la referencia de origen cuando está disponible. El servidor no ofrece operaciones para eliminar páginas ni para completar tareas.
 
 ## Requisitos
 
@@ -48,8 +49,12 @@ El servidor MCP usa Streamable HTTP en `/mcp`, puerto `8000`, y escucha por defe
 | `tareas_pendientes` | Lista tareas pendientes, opcionalmente por estado y rango de fechas. |
 | `resumen` | Devuelve conteos y tareas con vencimiento explícito para hoy. |
 | `crear_pagina` | Crea una página nueva a partir de título, contenido y metadatos opcionales. |
+| `leer_pagina_con_revision` | Lee el Markdown completo y su revisión para actualizarlo. |
+| `actualizar_pagina` | Reemplaza el Markdown completo si la revisión sigue vigente. |
 
 `crear_pagina` no añade metadatos por defecto. Cuando se proporciona `metadata`, la herramienta la serializa como frontmatter YAML y rechaza contenido que ya comienza con frontmatter. Las claves y valores admitidos se validan antes de enviar la solicitud. La creación usa `If-None-Match: *`; su protección depende de que el servidor SilverBullet aplique esa precondición.
+
+Para actualizar una página, llama a `leer_pagina_con_revision` y envía a `actualizar_pagina` el mismo `name`, el Markdown completo modificado en `content` y la `revision` recibida, incluidas sus comillas. El contenido reemplaza toda la página, incluido el frontmatter. Si otra edición cambia o elimina la página, se devuelve un conflicto: vuelve a leerla y resuelve los cambios antes de reintentar. La protección requiere una versión de SilverBullet que admita revisiones fuertes e implemente `If-Match`; verifica este comportamiento en tu instalación y sus proxies antes de depender de él.
 
 ## Limitaciones y seguridad
 

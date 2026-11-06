@@ -13,6 +13,8 @@ import urllib.parse
 import urllib.request
 from zoneinfo import ZoneInfo
 
+import yaml
+
 
 EXPRESSIONS = {
     "available": "index.isAvailable()",
@@ -147,19 +149,30 @@ class SilverBulletClient:
             tasks.append(item)
         return tasks
 
-    def page(self, name):
+    def _page_url(self, name):
         if (not isinstance(name, str) or not name or "\\" in name or "%" in name
                 or any(ord(c) < 32 or ord(c) == 127 for c in name)
                 or any(part in ("", ".", "..") for part in name.split("/"))):
             raise ConnectorError("Invalid page name")
-        url = self.base_url + "/.fs/" + urllib.parse.quote(name, safe="/") + ".md"
-        request = urllib.request.Request(url, headers={"Accept": "text/markdown"}, method="GET")
+        try:
+            return self.base_url + "/.fs/" + urllib.parse.quote(name, safe="/") + ".md"
+        except UnicodeEncodeError as exc:
+            raise ConnectorError("Invalid page name") from exc
+
+    def page(self, name, with_revision=False):
+        request = urllib.request.Request(self._page_url(name), headers={"Accept": "text/markdown"}, method="GET")
         try:
             with self.opener.open(request, timeout=self.timeout) as response:
                 payload = response.read(MAX_PAGE_BYTES + 1)
+                revision = (response.headers.get("X-SilverBullet-Revision") or response.headers.get("ETag")) if with_revision else None
             if len(payload) > MAX_PAGE_BYTES:
                 raise ConnectorError("Page exceeds size limit")
-            return payload.decode("utf-8")
+            content = payload.decode("utf-8")
+            if with_revision:
+                if not revision or not re.fullmatch(r'"[\x21\x23-\x7e]+"', revision):
+                    raise ConnectorError("SilverBullet did not return a strong page revision")
+                return {"name": name, "content": content, "revision": revision}
+            return content
         except (urllib.error.URLError, OSError, TimeoutError) as exc:
             raise ConnectorError("SilverBullet page request failed") from exc
         except UnicodeDecodeError as exc:
@@ -185,8 +198,6 @@ class SilverBulletClient:
         if metadata:
             if re.match(r"\A\ufeff?---(?:[ \t]*(?:\r?\n|\r|\Z))", content):
                 raise ConnectorError("Page content already starts with frontmatter")
-            lines = []
-            size = len(content_bytes) + 8
             for key, value in metadata.items():
                 if (not isinstance(key, str) or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_-]{0,127}", key)
                         or key in ("__proto__", "prototype", "constructor")):
@@ -201,15 +212,10 @@ class SilverBulletClient:
                             item.encode("utf-8")
                         except UnicodeEncodeError as exc:
                             raise ConnectorError("Metadata must contain valid Unicode") from exc
-                try:
-                    line = json.dumps(key, ensure_ascii=True) + ": " + json.dumps(value, ensure_ascii=True, allow_nan=False) + "\n"
-                except (ValueError, OverflowError) as exc:
-                    raise ConnectorError("Invalid metadata value") from exc
-                size += len(line)
-                if size > MAX_PAGE_BYTES:
-                    raise ConnectorError("Page title or content exceeds size limit")
-                lines.append(line)
-            content_bytes = ("---\n" + "".join(lines) + "---\n").encode("ascii") + content_bytes
+            frontmatter = yaml.safe_dump(metadata, allow_unicode=True, sort_keys=False, default_flow_style=False)
+            content_bytes = ("---\n" + frontmatter + "---\n").encode("utf-8") + content_bytes
+            if len(content_bytes) > MAX_PAGE_BYTES:
+                raise ConnectorError("Page title or content exceeds size limit")
         url = self.base_url + "/.fs/" + urllib.parse.quote(title, safe="") + ".md"
         request = urllib.request.Request(
             url, data=content_bytes, method="PUT",
@@ -226,6 +232,35 @@ class SilverBulletClient:
         except (urllib.error.URLError, OSError, TimeoutError) as exc:
             raise ConnectorError("SilverBullet page creation request failed") from exc
         return title
+
+    def update_page(self, name, content, revision):
+        """Replace a page only if its strong revision still matches."""
+        url = self._page_url(name)
+        if not isinstance(content, str):
+            raise ConnectorError("Page content must be a string")
+        try:
+            payload = content.encode("utf-8")
+        except UnicodeEncodeError as exc:
+            raise ConnectorError("Page must contain valid Unicode") from exc
+        if len(payload) > MAX_PAGE_BYTES:
+            raise ConnectorError("Page content exceeds size limit")
+        if not isinstance(revision, str) or not re.fullmatch(r'"[\x21\x23-\x7e]+"', revision):
+            raise ConnectorError("A strong page revision is required")
+        request = urllib.request.Request(
+            url, data=payload, method="PUT",
+            headers={"Content-Type": "text/markdown; charset=utf-8", "X-Sync-Mode": "true",
+                     "If-Match": revision},
+        )
+        try:
+            with self.opener.open(request, timeout=self.timeout):
+                pass
+        except urllib.error.HTTPError as exc:
+            if exc.code == 412:
+                raise ConnectorError("Page changed or does not exist (conflict)") from exc
+            raise ConnectorError("SilverBullet page update request failed") from exc
+        except (urllib.error.URLError, OSError, TimeoutError) as exc:
+            raise ConnectorError("SilverBullet page update request failed") from exc
+        return name
 
     def search(self, term, tag=None, status=None):
         if not isinstance(term, str) or not term.strip():

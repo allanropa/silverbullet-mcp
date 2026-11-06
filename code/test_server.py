@@ -65,7 +65,8 @@ class MCPServerTests(unittest.TestCase):
         result = self.rpc("tools/list")["result"]
         tools = {tool["name"]: tool for tool in result["tools"]}
         self.assertEqual(set(tools), {"listar_paginas", "leer_pagina", "buscar", "tareas_pendientes", "resumen",
-                                      "buscar_por_clave", "notas_relacionadas", "tareas_de_entidad", "crear_pagina"})
+                                      "buscar_por_clave", "notas_relacionadas", "tareas_de_entidad", "crear_pagina",
+                                      "leer_pagina_con_revision", "actualizar_pagina"})
         for name, tool in tools.items():
             if name == "crear_pagina":
                 self.assertFalse(tool["annotations"]["readOnlyHint"])
@@ -74,12 +75,31 @@ class MCPServerTests(unittest.TestCase):
                 self.assertEqual(tool["inputSchema"]["required"], ["title", "content"])
                 self.assertIn("metadata", tool["inputSchema"]["properties"])
                 continue
+            if name == "actualizar_pagina":
+                self.assertFalse(tool["annotations"]["readOnlyHint"])
+                self.assertTrue(tool["annotations"]["destructiveHint"])
+                self.assertEqual(tool["inputSchema"]["required"], ["name", "content", "revision"])
+                continue
             self.assertTrue(tool["annotations"]["readOnlyHint"])
             self.assertFalse(tool["annotations"]["destructiveHint"])
             self.assertEqual(tool["inputSchema"]["type"], "object")
         self.assertEqual(tools["leer_pagina"]["inputSchema"]["required"], ["name"])
         self.assertEqual(tools["buscar"]["inputSchema"]["required"], ["term"])
         self.upstream.assert_not_called()
+        self.upstream.available.assert_not_called()
+
+    def test_read_revision_and_update_tools(self):
+        self.upstream.page.return_value = {"name": "A", "content": "old", "revision": '"abc"'}
+        self.upstream.update_page.return_value = "A"
+        result = self.call_tool("leer_pagina_con_revision", {"name": "A"})["result"]
+        self.assertEqual(json.loads(result["content"][0]["text"]), self.upstream.page.return_value)
+        self.upstream.page.assert_called_once_with("A", with_revision=True)
+        result = self.call_tool("actualizar_pagina", {"name": "A", "content": "new", "revision": '"abc"'})["result"]
+        self.assertEqual(json.loads(result["content"][0]["text"]), {"name": "A"})
+        self.upstream.update_page.assert_called_once_with("A", "new", '"abc"')
+        self.upstream.update_page.side_effect = ConnectorError("conflict")
+        result = self.call_tool("actualizar_pagina", {"name": "A", "content": "new", "revision": '"abc"'})["result"]
+        self.assertTrue(result["isError"])
         self.upstream.available.assert_not_called()
 
     def test_create_page_tool(self):

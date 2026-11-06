@@ -67,6 +67,18 @@ def crear_pagina(title: str, content: str, metadata: dict | None = None) -> dict
 
 
 @mcp.tool(annotations={"readOnlyHint": True, "destructiveHint": False, "openWorldHint": True})
+def leer_pagina_con_revision(name: NonEmpty) -> dict:
+    """Read the full page and its strong revision before updating it."""
+    return client.page(name, with_revision=True)
+
+
+@mcp.tool(annotations={"readOnlyHint": False, "destructiveHint": True, "idempotentHint": False, "openWorldHint": True})
+def actualizar_pagina(name: NonEmpty, content: str, revision: str) -> dict:
+    """Replace the entire Markdown page, including frontmatter, if its revision still matches."""
+    return {"name": client.update_page(name, content, revision)}
+
+
+@mcp.tool(annotations={"readOnlyHint": True, "destructiveHint": False, "openWorldHint": True})
 def buscar(term: NonEmpty, tag: OptionalFilter = None, status: OptionalFilter = None) -> dict:
     """Search page contents and task text; page filters apply to both result types."""
     require_index()

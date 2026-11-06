@@ -3,6 +3,7 @@ import io
 import json
 import unittest
 import urllib.error
+import yaml
 from contextlib import redirect_stderr, redirect_stdout
 from unittest.mock import patch
 
@@ -10,8 +11,9 @@ import connector
 
 
 class Response:
-    def __init__(self, value):
+    def __init__(self, value, headers=None):
         self.value = value
+        self.headers = headers or {}
 
     def __enter__(self):
         return self
@@ -33,7 +35,7 @@ class Opener:
         result = self.results.pop(0)
         if isinstance(result, Exception):
             raise result
-        return Response(result if isinstance(result, bytes) else json.dumps(result).encode())
+        return result if isinstance(result, Response) else Response(result if isinstance(result, bytes) else json.dumps(result).encode())
 
 
 def wrapped(result):
@@ -101,11 +103,49 @@ class ConnectorTests(unittest.TestCase):
         client, opener = self.client([b""])
         content = "Cuerpo Ω\r\n"
         client.create_page("Title", content, metadata)
-        expected = "---\n" + "".join(json.dumps(k, ensure_ascii=True) + ": " +
-                                      json.dumps(v, ensure_ascii=True) + "\n"
-                                      for k, v in metadata.items()) + "---\n"
-        self.assertEqual(opener.requests[0][0].data, expected.encode("ascii") + content.encode("utf-8"))
+        result = opener.requests[0][0].data.decode("utf-8")
+        frontmatter, body = result[4:].split("\n---\n", 1)
+        self.assertEqual(yaml.safe_load(frontmatter), metadata)
+        self.assertEqual(body, content)
+        self.assertIn("draft: false\n", result)
+        self.assertNotIn('"draft"', result)
         self.assertEqual(opener.requests[0][0].get_header("If-none-match"), "*")
+
+    def test_metadata_plain_and_ambiguous_strings(self):
+        metadata = {"title": "Nota café", "status": "true", "date": "2026-11-06", "tags": ["project/foo", "null"]}
+        client, opener = self.client([b""])
+        client.create_page("Title", "", metadata)
+        data = opener.requests[0][0].data.decode()
+        self.assertIn("title: Nota café\n", data)
+        self.assertEqual(yaml.safe_load(data[4:-4]), metadata)
+
+    def test_page_revision_and_update(self):
+        client, opener = self.client([Response(b"original", {"ETag": '"sha256:abc"'}), b""])
+        page = client.page("Carpeta/Nota #1", with_revision=True)
+        self.assertEqual(page, {"name": "Carpeta/Nota #1", "content": "original", "revision": '"sha256:abc"'})
+        self.assertEqual(client.update_page(page["name"], "---\ntitle: café\n---\n", page["revision"]), page["name"])
+        request, timeout = opener.requests[1]
+        self.assertEqual(request.full_url, "http://example.test:3000/.fs/Carpeta/Nota%20%231.md")
+        self.assertEqual(request.method, "PUT")
+        self.assertEqual(request.get_header("If-match"), page["revision"])
+        self.assertEqual(request.get_header("X-sync-mode"), "true")
+        self.assertEqual(request.data, "---\ntitle: café\n---\n".encode())
+        self.assertEqual(timeout, 10)
+
+    def test_update_validation_and_conflicts(self):
+        client, opener = self.client([])
+        for name, content, revision in [("../x", "", '"a"'), ("A", None, '"a"'),
+                                        ("A", "\ud800", '"a"'), ("A", "x" * (connector.MAX_PAGE_BYTES + 1), '"a"'),
+                                        ("A", "", "*"), ("A", "", 'W/"a"'), ("A", "", '"a\nb"')]:
+            with self.subTest(name=name, revision=revision), self.assertRaises(connector.ConnectorError):
+                client.update_page(name, content, revision)
+        self.assertEqual(opener.requests, [])
+        for headers in ({}, {"ETag": 'W/"a"'}):
+            with self.assertRaisesRegex(connector.ConnectorError, "revision"):
+                self.client([Response(b"x", headers)])[0].page("A", with_revision=True)
+        error = urllib.error.HTTPError("http://example.test", 412, "error", {}, None)
+        with self.assertRaisesRegex(connector.ConnectorError, "conflict"):
+            self.client([error])[0].update_page("A", "new", '"old"')
 
     def test_create_page_empty_metadata_preserves_existing_frontmatter(self):
         for metadata in (None, {}):
